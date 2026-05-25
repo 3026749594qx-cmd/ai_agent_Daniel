@@ -2,13 +2,13 @@
 import json
 import re
 import os
+import time
 import matplotlib.pyplot as plt
 import numpy as np
 from openai import OpenAI
 from web_search_china import WebSearchChina
 
 # ==================== 第二部分：配置加载 ====================
-# 从项目同目录的 config.json 中读取智谱 API Key，写入环境变量
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 if os.path.exists(config_path):
     with open(config_path, 'r', encoding='utf-8') as f:
@@ -52,8 +52,15 @@ SYSTEM_PROMPT = """你是一个轻量化的 AI Agent，能够调用以下工具�
 - 只输出 JSON，不要有其他文字
 """
 
-# ==================== 第四部分：基础安全函数 ====================
-# 项目根目录（允许操作的文件路径上限）
+# ==================== 第四部分：流式输出辅助函数 ====================
+def stream_print(text: str, delay: float = 0.02, end: str = "\n"):
+    """逐字打印文本，模拟流式输出效果"""
+    for ch in text:
+        print(ch, end='', flush=True)
+        time.sleep(delay)
+    print(end, end='', flush=True)
+
+# ==================== 第五部分：基础安全函数 ====================
 ALLOWED_ROOT = os.path.abspath(".")
 
 def safe_path(filename: str) -> str:
@@ -63,7 +70,7 @@ def safe_path(filename: str) -> str:
         raise PermissionError(f"不允许操作目录外的文件: {filename}")
     return abs_path
 
-# ==================== 第五部分：五个工具函数 ====================
+# ==================== 第六部分：五个工具函数 ====================
 def search_web(query: str) -> str:
     """使用必应搜索，返回摘要与链接"""
     try:
@@ -102,11 +109,9 @@ def plot_height_distribution(input_str: str) -> str:
         return "身高必须是数字。"
     name = parts[1]
 
-    # 设置中文字体，避免乱码
     plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei']
     plt.rcParams['axes.unicode_minus'] = False
 
-    # 绘制正态分布曲线
     mean, std = 170.0, 7.0
     x = np.linspace(mean - 4*std, mean + 4*std, 500)
     y = (1/(std*np.sqrt(2*np.pi))) * np.exp(-0.5*((x-mean)/std)**2)
@@ -152,7 +157,7 @@ def read_file(filename: str) -> str:
     except Exception as e:
         return f"读取失败: {e}"
 
-# ==================== 第六部分：工具注册表 ====================
+# ==================== 第七部分：工具注册表 ====================
 TOOLS = {
     "search_web": search_web,
     "calculate": calculate,
@@ -161,18 +166,20 @@ TOOLS = {
     "read_file": read_file,
 }
 
-# ==================== 第七部分：Agent 核心循环 ====================
+# ==================== 第八部分：Agent 核心循环（含流式输出） ====================
 def process_query(client, model, messages, max_steps=8):
-    """执行 ReAct 循环，接收消息历史，返回最终回答"""
+    """
+    执行 ReAct 循环，所有输出（思考、行动、观察）都通过 stream_print 逐字显示。
+    返回最终答案字符串（不打印）。
+    """
     for step in range(max_steps):
-        # 1. 调用大模型，获取响应文本
+        # 1. 调用大模型，获取完整响应（为了解析 JSON，仍使用非流式）
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=0.0
         )
         raw = resp.choices[0].message.content.strip()
-        print(f"\n[Step {step+1}] 模型输出: {raw}")
 
         # 2. 解析 JSON（正则兜底）
         try:
@@ -187,15 +194,24 @@ def process_query(client, model, messages, max_steps=8):
             else:
                 return "模型输出解析失败，请重试。"
 
-        # 3. 判断是否为最终回答
+        # 3. 输出思考过程（流式）
+        if "thought" in action_json:
+            thought = action_json["thought"]
+            print()  # 换行
+            stream_print("💭 思考: ", delay=0, end="")
+            stream_print(thought, delay=0.02, end="\n\n")
+
+        # 4. 判断是否为最终回答
         if "final_answer" in action_json:
+            # 返回最终答案，由外层负责流式打印
             return action_json["final_answer"]
 
-        # 4. 处理工具调用
+        # 5. 处理工具调用（需打印行动和观察）
         if "action" in action_json and "action_input" in action_json:
             tool_name = action_json["action"]
             tool_input = action_json["action_input"]
-            print(f">>> 调用工具: {tool_name}({tool_input})")
+            stream_print("🔧 行动: ", delay=0, end="")
+            stream_print(f"{tool_name}({tool_input})", delay=0.02, end="\n\n")
 
             func = TOOLS.get(tool_name)
             if not func:
@@ -206,7 +222,11 @@ def process_query(client, model, messages, max_steps=8):
                 except Exception as e:
                     observation = f"执行错误: {e}"
 
-            print(f">>> 观察结果: {str(observation)[:200]}")
+            stream_print("📋 观察: ", delay=0, end="")
+            # 观察结果可能较长，截断显示前200字符
+            obs_display = observation[:200] + ("..." if len(observation) > 200 else "")
+            stream_print(obs_display, delay=0.02, end="\n\n")
+
             # 将模型输出和观察结果追加回消息历史
             messages.append({"role": "assistant", "content": raw})
             messages.append({"role": "user", "content": f"工具执行结果: {observation}"})
@@ -215,25 +235,22 @@ def process_query(client, model, messages, max_steps=8):
 
     return "任务步数超限，请简化需求后重试。"
 
-# ==================== 第八部分：主交互函数 ====================
+# ==================== 第九部分：主交互函数（含最终答案流式） ====================
 def main():
-    # 获取 API Key
     api_key = os.getenv("ZHIPU_API_KEY")
     if not api_key:
         print("❌ 未配置 API Key！请确保 config.json 存在于 agent.py 同目录，且格式为：")
         print('   {"ZHIPU_API_KEY": "你的Key"}')
         return
 
-    # 初始化客户端和模型
     client = OpenAI(
         api_key=api_key,
         base_url="https://open.bigmodel.cn/api/paas/v4/"
     )
     model = "glm-4.7-flash"
 
-    # 打印欢迎界面
     print("=" * 60)
-    print("🤖 轻量化 AI Agent 已启动")
+    print("🤖 轻量化 AI Agent 已启动（流式输出模式）")
     print("=" * 60)
     print("【已配置工具】")
     print("  1. search_web    - bing搜索")
@@ -245,10 +262,8 @@ def main():
     print("【输入 'exit' 或 'quit' 退出】")
     print("=" * 60)
 
-    # 初始化消息历史（第一条是系统提示词）
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # 主交互循环
     while True:
         user_input = input("\n🧑 你好！命令我干活吧: ").strip()
         if not user_input:
@@ -261,17 +276,18 @@ def main():
             print("能力范围: 查信息 / 算数 / 画身高分布图 / 读写当前目录文件")
             continue
 
-        # 将用户输入加入消息历史
         messages.append({"role": "user", "content": user_input})
 
-        # 调用核心循环处理
         print("\n--- 开始处理 ---")
-        final = process_query(client, model, messages)
-        print(f"\n🤖 Agent: {final}")
+        final_answer = process_query(client, model, messages)
 
-        # 将最终答案加入消息历史，保持多轮对话
-        messages.append({"role": "assistant", "content": final})
+        # 流式输出最终答案
+        print()  # 与前面的输出分隔
+        stream_print("🤖 Agent: ", delay=0, end="")
+        stream_print(final_answer, delay=0.02, end="\n\n")
 
-# ==================== 第九部分：程序入口 ====================
+        messages.append({"role": "assistant", "content": final_answer})
+
+# ==================== 第十部分：程序入口 ====================
 if __name__ == "__main__":
     main()
