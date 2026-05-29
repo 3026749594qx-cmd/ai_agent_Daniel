@@ -3,11 +3,12 @@ import json
 import re
 import os
 import time
-from datetime import datetime  # 新增：用于记忆时间戳
+from datetime import datetime
 import matplotlib.pyplot as plt
 import numpy as np
 from openai import OpenAI
 from web_search_china import WebSearchChina
+import trafilatura   # 新增：用于全文提取
 
 # ==================== 第二部分：配置加载 ====================
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -22,31 +23,71 @@ SYSTEM_PROMPT = """你是一个轻量化的 AI Agent，能够调用以下工具�
 【可用工具清单】
 
 1. search_web(query: str) -> str
-   使用国内搜索引擎搜索网络信息，返回摘要和链接。适合查人物、概念、新闻等。
+   使用必应搜索，返回标题、摘要和链接。摘要通常较短，可能不包含完整信息。
 
-2. calculate(expression: str) -> str
+2. fetch_full_text(url: str) -> str
+   获取指定网页的完整正文内容（纯文本）。输入：完整的 http/https 链接。
+   适用场景：当搜索结果中的摘要信息不足以回答用户问题时，使用本工具深入阅读全文。
+
+3. calculate(expression: str) -> str
    计算数学表达式。例如 "175 + 3" 或 "(100-20)*3"。
 
-3. plot_height_distribution(input: str) -> str
-   根据身高和姓名绘制全球身高分布图。
-   输入格式："身高(cm), 姓名"，例如 "226.0, 姚明"。
-   返回图片保存路径。
+4. plot_height_distribution(input: str) -> str
+   根据身高和姓名绘制全球身高分布图。输入格式："身高(cm), 姓名"。
 
-4. write_file(input: str) -> str
-   写入本地文件（仅限当前目录）。
-   输入格式："文件名, 内容"。
-   例如 "data.txt, 姚明身高226cm"。
+5. write_file(input: str) -> str
+   写入本地文件，输入格式："文件名, 内容"。
 
-5. read_file(filename: str) -> str
-   读取本地文件内容（仅限当前目录）。
+6. read_file(filename: str) -> str
+   读取本地文件内容。
 
-6. remember(input: str) -> str
-   记住一条用户信息。输入格式："键, 值"，例如 "喜欢的颜色, 蓝色"。
-   这条信息会在未来的对话中一直保留。
+7. remember(input: str) -> str
+   记住一条用户信息。输入格式："键, 值"。
+
+【工作规则 - 非常重要！】
+
+1. 每次只能调用一个工具。
+
+2. 当用户要求搜索信息时，你必须遵循以下“两步走”策略：
+   - 第一步：调用 search_web 获取摘要和链接。
+   - 第二步：**你必须至少打开一个搜索结果链接获取全文，除非摘要已经明确给出完整答案**。
+   - 明确给出完整答案的判断标准：摘要中已经包含了用户所需的所有具体信息（如具体数字、日期、定义等），且没有“...”或“点击阅读全文”等截断提示。
+   - 如果摘要不完整或信息量不足，你必须选择最相关的 1 个链接，调用 fetch_full_text 获取全文内容。
+
+3. 你完全自主决定是否需要提取全文，无需用户额外指令。**强制要求：在大多数搜索任务中，你应当主动获取至少一个链接的全文。**
+
+4. 基于全文（或完整摘要）生成最终回答。
+
+【输出格式】
+- 调用工具时输出：
+{"thought": "思考过程", "action": "工具名", "action_input": "参数"}
+- 任务完成时输出：
+{"thought": "总结", "final_answer": "给用户的回答"}
+
+【示例对话】
+
+用户：姚明身高多少？
+Agent 第一步输出：
+{"thought": "需要先搜索姚明身高", "action": "search_web", "action_input": "姚明身高"}
+（观察返回：标题：姚明身高_百度百科，摘要：姚明，身高226厘米。链接：...）
+此时摘要已明确给出完整答案（226厘米），无需提取全文。
+Agent 最终输出：
+{"thought": "摘要已包含准确身高", "final_answer": "姚明的身高是226厘米。"}
+
+用户：搜索一下2025年AI的最新突破。
+Agent 第一步输出：
+{"thought": "先搜索AI新闻", "action": "search_web", "action_input": "2025年AI重大突破"}
+（观察返回：标题：AI新模型发布，摘要：该模型在...（此处省略200字）...点击阅读全文。摘要明显被截断）
+由于摘要不完整，Agent 必须继续：
+Agent 第二步输出：
+{"thought": "摘要信息不完整，需要打开第一个链接获取全文", "action": "fetch_full_text", "action_input": "https://news.com/ai-breakthrough"}
+（观察返回：完整正文约3000字，详细描述了三个突破点）
+Agent 最终输出：
+{"thought": "基于全文提取到三个突破点", "final_answer": "根据最新报道，2025年AI有三大突破：1. ... 2. ... 3. ..."}
 
 【你的能力边界】
-- ✅ 查信息、算数、画身高分布图、读写当前目录下的文件、记住用户信息
-- ❌ 超出以上工具范围的任务无法完成，请诚实告知用户
+- ✅ 查信息、深入阅读网页、算数、画身高分布图、读写文件、记住信息
+- ❌ 超出以上工具范围的任务无法完成
 
 【工作规则】
 - 每次只调用一个工具
@@ -75,7 +116,7 @@ def safe_path(filename: str) -> str:
         raise PermissionError(f"不允许操作目录外的文件: {filename}")
     return abs_path
 
-# ==================== 第六部分：五个工具函数 ====================
+# ==================== 第六部分：工具函数（含新增全文提取） ====================
 def search_web(query: str) -> str:
     """使用必应搜索，返回摘要与链接"""
     try:
@@ -92,6 +133,42 @@ def search_web(query: str) -> str:
         return "\n\n".join(formatted)
     except Exception as e:
         return f"搜索时发生错误: {str(e)}"
+
+def fetch_full_text(url: str) -> str:
+    """
+    使用 Trafilatura 提取网页正文（纯文本）
+    参数:
+        url: 完整的 http/https 链接
+    返回:
+        正文文本（最长 4000 字符），若失败则返回错误信息
+    """
+    # 简单的 URL 合法性检查
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return "无效的 URL，必须以 http:// 或 https:// 开头。"
+    try:
+        # 下载页面（内置超时）
+        downloaded = trafilatura.fetch_url(url)
+        if downloaded is None:
+            return f"无法获取页面内容，请检查 URL 是否可访问: {url}"
+
+        # 提取正文（关闭注释和表格保留）
+        text = trafilatura.extract(
+            downloaded,
+            include_comments=False,
+            include_tables=True,
+            include_formatting=True
+        )
+        if not text:
+            return "未能提取到有效正文，页面可能为视频、图片集或无主要内容。"
+
+        # 控制返回长度（避免 token 爆炸）
+        max_chars = 4000
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n\n... (内容过长，已截断)"
+
+        return text.strip()
+    except Exception as e:
+        return f"提取正文时发生错误: {str(e)}"
 
 def calculate(expression: str) -> str:
     """安全计算数学表达式，仅允许数字和基础运算符"""
@@ -162,7 +239,18 @@ def read_file(filename: str) -> str:
     except Exception as e:
         return f"读取失败: {e}"
 
-# ==================== 第十一部分：长期记忆管理 ====================
+def remember(input_str: str) -> str:
+    """记住用户提供的一条信息。格式："键, 值" """
+    parts = input_str.split(",", 1)
+    if len(parts) != 2:
+        return "格式错误，应为：键, 值。例如：喜欢的颜色, 蓝色"
+    key, value = parts[0].strip(), parts[1].strip()
+    if not key or not value:
+        return "键和值都不能为空。"
+    update_user_info(key, value)
+    return f"已记住：{key} = {value}"
+
+# ==================== 第七部分：长期记忆管理 ====================
 MEMORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory.json")
 
 def load_memory():
@@ -205,29 +293,18 @@ def build_memory_prompt():
         lines.append(f"- {k}: {v}")
     return "\n".join(lines)
 
-# ==================== 第十二部分：记忆工具（新增） ====================
-def remember(input_str: str) -> str:
-    """记住用户提供的一条信息。格式："键, 值" """
-    parts = input_str.split(",", 1)
-    if len(parts) != 2:
-        return "格式错误，应为：键, 值。例如：喜欢的颜色, 蓝色"
-    key, value = parts[0].strip(), parts[1].strip()
-    if not key or not value:
-        return "键和值都不能为空。"
-    update_user_info(key, value)
-    return f"已记住：{key} = {value}"
-
-# ==================== 第七部分：工具注册表（更新） ====================
+# ==================== 第八部分：工具注册表（已包含 fetch_full_text） ====================
 TOOLS = {
     "search_web": search_web,
+    "fetch_full_text": fetch_full_text,   # 新增
     "calculate": calculate,
     "plot_height_distribution": plot_height_distribution,
     "write_file": write_file,
     "read_file": read_file,
-    "remember": remember,          # 新增
+    "remember": remember,
 }
 
-# ==================== 第八部分：Agent 核心循环（含流式输出） ====================
+# ==================== 第九部分：Agent 核心循环（含流式输出） ====================
 def process_query(client, model, messages, max_steps=8):
     """
     执行 ReAct 循环，所有输出（思考、行动、观察）都通过 stream_print 逐字显示。
@@ -293,7 +370,7 @@ def process_query(client, model, messages, max_steps=8):
 
     return "任务步数超限，请简化需求后重试。"
 
-# ==================== 第九部分：主交互函数（含记忆加载与退出摘要） ====================
+# ==================== 第十部分：主交互函数（含记忆加载与退出摘要） ====================
 def main():
     api_key = os.getenv("ZHIPU_API_KEY")
     if not api_key:
@@ -312,16 +389,17 @@ def main():
     full_system_prompt = SYSTEM_PROMPT + memory_extension
 
     print("=" * 60)
-    print("🤖 轻量化 AI Agent 已启动（流式输出 + 长期记忆）")
+    print("🤖 轻量化 AI Agent 已启动（流式输出 + 长期记忆 + 全文提取）")
     print("=" * 60)
     print("【已配置工具】")
-    print("  1. search_web    - bing搜索")
-    print("  2. calculate     - 数学计算")
-    print("  3. plot_height_distribution - 身高分布图")
-    print("  4. write_file    - 写入本地文件（当前目录）")
-    print("  5. read_file     - 读取本地文件（当前目录）")
-    print("  6. remember      - 长期记忆（记住用户信息）")
-    print("【能力范围】查信息 / 算数 / 画身高分布图 / 读写当前目录文件 / 长期记忆")
+    print("  1. search_web        - bing搜索（返回标题/摘要/链接）")
+    print("  2. fetch_full_text   - 提取网页全文（需提供完整URL）")
+    print("  3. calculate         - 数学计算")
+    print("  4. plot_height_distribution - 身高分布图")
+    print("  5. write_file        - 写入本地文件（当前目录）")
+    print("  6. read_file         - 读取本地文件（当前目录）")
+    print("  7. remember          - 长期记忆（记住用户信息）")
+    print("【能力范围】搜索并深入阅读网页 / 计算 / 绘图 / 文件读写 / 长期记忆")
     print("【输入 'exit' 或 'quit' 退出】")
     print("=" * 60)
 
@@ -351,8 +429,8 @@ def main():
             break
 
         if user_input.lower() == "help":
-            print("可用工具: search_web, calculate, plot_height_distribution, write_file, read_file, remember")
-            print("能力范围: 查信息 / 算数 / 画身高分布图 / 读写当前目录文件 / 长期记忆")
+            print("可用工具: search_web, fetch_full_text, calculate, plot_height_distribution, write_file, read_file, remember")
+            print("能力范围: 搜索+深入阅读网页 / 计算 / 绘图 / 文件读写 / 长期记忆")
             continue
 
         messages.append({"role": "user", "content": user_input})
@@ -367,6 +445,6 @@ def main():
 
         messages.append({"role": "assistant", "content": final_answer})
 
-# ==================== 第十部分：程序入口 ====================
+# ==================== 第十一部分：程序入口 ====================
 if __name__ == "__main__":
     main()
