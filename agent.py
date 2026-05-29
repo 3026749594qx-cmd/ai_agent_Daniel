@@ -3,6 +3,7 @@ import json
 import re
 import os
 import time
+from datetime import datetime  # 新增：用于记忆时间戳
 import matplotlib.pyplot as plt
 import numpy as np
 from openai import OpenAI
@@ -39,8 +40,12 @@ SYSTEM_PROMPT = """你是一个轻量化的 AI Agent，能够调用以下工具�
 5. read_file(filename: str) -> str
    读取本地文件内容（仅限当前目录）。
 
+6. remember(input: str) -> str
+   记住一条用户信息。输入格式："键, 值"，例如 "喜欢的颜色, 蓝色"。
+   这条信息会在未来的对话中一直保留。
+
 【你的能力边界】
-- ✅ 查信息、算数、画身高分布图、读写当前目录下的文件
+- ✅ 查信息、算数、画身高分布图、读写当前目录下的文件、记住用户信息
 - ❌ 超出以上工具范围的任务无法完成，请诚实告知用户
 
 【工作规则】
@@ -157,13 +162,69 @@ def read_file(filename: str) -> str:
     except Exception as e:
         return f"读取失败: {e}"
 
-# ==================== 第七部分：工具注册表 ====================
+# ==================== 第十一部分：长期记忆管理 ====================
+MEMORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory.json")
+
+def load_memory():
+    """从本地 JSON 文件加载记忆字典"""
+    if not os.path.exists(MEMORY_FILE):
+        return {"user_info": {}, "session_history": []}
+    with open(MEMORY_FILE, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+def save_memory(memory_dict):
+    """保存记忆字典到本地 JSON 文件"""
+    with open(MEMORY_FILE, 'w', encoding='utf-8') as f:
+        json.dump(memory_dict, f, ensure_ascii=False, indent=2)
+
+def update_user_info(key, value):
+    """更新用户偏好信息"""
+    memory = load_memory()
+    memory["user_info"][key] = value
+    save_memory(memory)
+
+def add_session_summary(summary):
+    """添加一条会话摘要到历史记录（保留最近 10 条）"""
+    memory = load_memory()
+    memory["session_history"].append({
+        "timestamp": datetime.now().isoformat(),
+        "summary": summary
+    })
+    if len(memory["session_history"]) > 10:
+        memory["session_history"] = memory["session_history"][-10:]
+    save_memory(memory)
+
+def build_memory_prompt():
+    """从记忆库中抽取用户信息，组合成一段附加提示词"""
+    memory = load_memory()
+    user_info = memory.get("user_info", {})
+    if not user_info:
+        return ""
+    lines = ["\n【已知用户信息】"]
+    for k, v in user_info.items():
+        lines.append(f"- {k}: {v}")
+    return "\n".join(lines)
+
+# ==================== 第十二部分：记忆工具（新增） ====================
+def remember(input_str: str) -> str:
+    """记住用户提供的一条信息。格式："键, 值" """
+    parts = input_str.split(",", 1)
+    if len(parts) != 2:
+        return "格式错误，应为：键, 值。例如：喜欢的颜色, 蓝色"
+    key, value = parts[0].strip(), parts[1].strip()
+    if not key or not value:
+        return "键和值都不能为空。"
+    update_user_info(key, value)
+    return f"已记住：{key} = {value}"
+
+# ==================== 第七部分：工具注册表（更新） ====================
 TOOLS = {
     "search_web": search_web,
     "calculate": calculate,
     "plot_height_distribution": plot_height_distribution,
     "write_file": write_file,
     "read_file": read_file,
+    "remember": remember,          # 新增
 }
 
 # ==================== 第八部分：Agent 核心循环（含流式输出） ====================
@@ -203,7 +264,6 @@ def process_query(client, model, messages, max_steps=8):
 
         # 4. 判断是否为最终回答
         if "final_answer" in action_json:
-            # 返回最终答案，由外层负责流式打印
             return action_json["final_answer"]
 
         # 5. 处理工具调用（需打印行动和观察）
@@ -223,11 +283,9 @@ def process_query(client, model, messages, max_steps=8):
                     observation = f"执行错误: {e}"
 
             stream_print("📋 观察: ", delay=0, end="")
-            # 观察结果可能较长，截断显示前200字符
             obs_display = observation[:200] + ("..." if len(observation) > 200 else "")
             stream_print(obs_display, delay=0.02, end="\n\n")
 
-            # 将模型输出和观察结果追加回消息历史
             messages.append({"role": "assistant", "content": raw})
             messages.append({"role": "user", "content": f"工具执行结果: {observation}"})
         else:
@@ -235,7 +293,7 @@ def process_query(client, model, messages, max_steps=8):
 
     return "任务步数超限，请简化需求后重试。"
 
-# ==================== 第九部分：主交互函数（含最终答案流式） ====================
+# ==================== 第九部分：主交互函数（含记忆加载与退出摘要） ====================
 def main():
     api_key = os.getenv("ZHIPU_API_KEY")
     if not api_key:
@@ -249,8 +307,12 @@ def main():
     )
     model = "glm-4.7-flash"
 
+    # 加载长期记忆，附加到系统提示词
+    memory_extension = build_memory_prompt()
+    full_system_prompt = SYSTEM_PROMPT + memory_extension
+
     print("=" * 60)
-    print("🤖 轻量化 AI Agent 已启动（流式输出模式）")
+    print("🤖 轻量化 AI Agent 已启动（流式输出 + 长期记忆）")
     print("=" * 60)
     print("【已配置工具】")
     print("  1. search_web    - bing搜索")
@@ -258,22 +320,39 @@ def main():
     print("  3. plot_height_distribution - 身高分布图")
     print("  4. write_file    - 写入本地文件（当前目录）")
     print("  5. read_file     - 读取本地文件（当前目录）")
-    print("【能力范围】查信息 / 算数 / 画身高分布图 / 读写当前目录文件")
+    print("  6. remember      - 长期记忆（记住用户信息）")
+    print("【能力范围】查信息 / 算数 / 画身高分布图 / 读写当前目录文件 / 长期记忆")
     print("【输入 'exit' 或 'quit' 退出】")
     print("=" * 60)
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": full_system_prompt}]
 
     while True:
         user_input = input("\n🧑 你好！命令我干活吧: ").strip()
         if not user_input:
             continue
         if user_input.lower() in ("exit", "quit"):
-            print("👋 Agent 已退出。")
+            # 退出前生成会话摘要（仅一次 API 调用，避免速率限制）
+            if len(messages) > 2:  # 有实质对话才生成
+                summary_prompt = "请用一句话总结本次对话的主要内容，不要超过50字。"
+                messages.append({"role": "user", "content": summary_prompt})
+                try:
+                    resp = client.chat.completions.create(
+                        model=model,
+                        messages=messages[-10:],  # 仅取最近10条消息，节约 token
+                        temperature=0.0
+                    )
+                    summary = resp.choices[0].message.content.strip()
+                    add_session_summary(summary)
+                    print(f"📝 会话摘要已保存: {summary}")
+                except Exception as e:
+                    print(f"⚠️ 生成会话摘要失败: {e}")
+            print("👋 Agent 已退出。下次启动时将保留我的记忆。")
             break
+
         if user_input.lower() == "help":
-            print("可用工具: search_web, calculate, plot_height_distribution, write_file, read_file")
-            print("能力范围: 查信息 / 算数 / 画身高分布图 / 读写当前目录文件")
+            print("可用工具: search_web, calculate, plot_height_distribution, write_file, read_file, remember")
+            print("能力范围: 查信息 / 算数 / 画身高分布图 / 读写当前目录文件 / 长期记忆")
             continue
 
         messages.append({"role": "user", "content": user_input})
@@ -282,7 +361,7 @@ def main():
         final_answer = process_query(client, model, messages)
 
         # 流式输出最终答案
-        print()  # 与前面的输出分隔
+        print()
         stream_print("🤖 Agent: ", delay=0, end="")
         stream_print(final_answer, delay=0.02, end="\n\n")
 
