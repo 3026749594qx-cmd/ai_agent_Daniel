@@ -1,0 +1,5 @@
+config.json
+memory.json
+*.png
+__pycache__/
+products/
