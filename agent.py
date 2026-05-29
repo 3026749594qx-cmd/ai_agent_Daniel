@@ -51,12 +51,14 @@ SYSTEM_PROMPT = """你是一个轻量化的 AI Agent，能够调用以下工具�
 
 4. plot_height_distribution(input: str) -> str
    根据身高和姓名绘制全球身高分布图。输入格式："身高(cm), 姓名"。
+   图片会自动保存到 products 文件夹。
 
 5. write_file(input: str) -> str
-   写入本地文件，输入格式："文件名, 内容"。
+   写入本地文件（自动保存在 products 文件夹下）。输入格式："文件名, 内容"。
+   例如 "data.txt, 姚明身高226cm"。
 
 6. read_file(filename: str) -> str
-   读取本地文件内容。
+   读取本地文件内容（自动从 products 文件夹读取）。
 
 7. remember(input: str) -> str
    记住一条用户信息。输入格式："键, 值"。
@@ -123,7 +125,15 @@ def stream_print(text: str, delay: float = 0.02, end: str = "\n"):
         time.sleep(delay)
     print(end, end='', flush=True)
 
-# ==================== 第五部分：基础安全函数 ====================
+# ==================== 第五部分：产品输出目录管理 ====================
+PRODUCTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "products")
+
+def ensure_products_dir():
+    """确保 products 目录存在，若不存在则创建"""
+    if not os.path.exists(PRODUCTS_DIR):
+        os.makedirs(PRODUCTS_DIR)
+
+# ==================== 第六部分：基础安全函数 ====================
 ALLOWED_ROOT = os.path.abspath(".")
 
 def safe_path(filename: str) -> str:
@@ -133,7 +143,7 @@ def safe_path(filename: str) -> str:
         raise PermissionError(f"不允许操作目录外的文件: {filename}")
     return abs_path
 
-# ==================== 第六部分：工具函数（网页搜索、全文提取、数学计算、身高分布绘图、文件写入、文件读取、信息记忆） ====================
+# ==================== 第七部分：工具函数 ====================
 def search_web(query: str) -> str:
     """使用必应搜索，返回摘要与链接"""
     try:
@@ -154,10 +164,6 @@ def search_web(query: str) -> str:
 def fetch_full_text(url: str) -> str:
     """
     使用 Trafilatura 提取网页正文（纯文本）
-    参数:
-        url: 完整的 http/https 链接
-    返回:
-        正文文本（最长 4000 字符），若失败则返回错误信息
     """
     if not (url.startswith("http://") or url.startswith("https://")):
         return "无效的 URL，必须以 http:// 或 https:// 开头。"
@@ -181,7 +187,7 @@ def fetch_full_text(url: str) -> str:
         return f"提取正文时发生错误: {str(e)}"
 
 def calculate(expression: str) -> str:
-    """安全计算数学表达式，仅允许数字和基础运算符"""
+    """安全计算数学表达式"""
     allowed_chars = set("0123456789+-*/().^% ")
     if not all(c in allowed_chars for c in expression):
         return "表达式含非法字符。"
@@ -191,7 +197,7 @@ def calculate(expression: str) -> str:
         return f"计算出错: {e}"
 
 def plot_height_distribution(input_str: str) -> str:
-    """根据身高和姓名绘制全球身高分布图并保存为PNG"""
+    """根据身高和姓名绘制全球身高分布图，保存到 products 文件夹"""
     parts = [p.strip() for p in input_str.split(",", 1)]
     if len(parts) != 2:
         return "格式错误，应为：身高(cm), 姓名"
@@ -217,19 +223,30 @@ def plot_height_distribution(input_str: str) -> str:
     plt.legend()
     plt.grid(alpha=0.3)
 
-    filename = f"{name}_height_distribution.png"
+    # 确保 products 目录存在
+    ensure_products_dir()
+    filename = os.path.join(PRODUCTS_DIR, f"{name}_height_distribution.png")
     plt.savefig(filename, dpi=150)
     plt.close()
     return f"图片已保存: {os.path.abspath(filename)}"
 
 def write_file(input_str: str) -> str:
-    """写入文件，输入格式：文件名, 内容"""
+    """写入文件（自动存入 products 文件夹），输入格式：文件名, 内容"""
     parts = input_str.split(",", 1)
     if len(parts) != 2:
         return "格式错误，应为：文件名, 内容"
     fname, content = parts[0].strip(), parts[1].strip()
+    # 如果用户只给了文件名，则自动加上 products/ 前缀
+    if not ('/' in fname or '\\' in fname):
+        ensure_products_dir()
+        fname = os.path.join("products", fname)
+    else:
+        # 如果包含路径，也要确保 products 目录存在（以防自定义子目录）
+        ensure_products_dir()
     try:
         path = safe_path(fname)
+        # 确保目标目录存在
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w', encoding='utf-8') as f:
             f.write(content)
         return f"文件 {fname} 写入成功。"
@@ -239,9 +256,13 @@ def write_file(input_str: str) -> str:
         return f"写入失败: {e}"
 
 def read_file(filename: str) -> str:
-    """读取文件内容（仅限当前目录）"""
+    """读取文件内容（默认从 products 文件夹读取）"""
+    fname = filename.strip()
+    # 如果只给了文件名，默认从 products 下查找
+    if not ('/' in fname or '\\' in fname):
+        fname = os.path.join("products", fname)
     try:
-        path = safe_path(filename.strip())
+        path = safe_path(fname)
         with open(path, 'r', encoding='utf-8') as f:
             return f.read()
     except PermissionError as e:
@@ -250,7 +271,7 @@ def read_file(filename: str) -> str:
         return f"读取失败: {e}"
 
 def remember(input_str: str) -> str:
-    """记住用户提供的一条信息。格式："键, 值" """
+    """记住用户提供的一条信息"""
     parts = input_str.split(",", 1)
     if len(parts) != 2:
         return "格式错误，应为：键, 值。例如：喜欢的颜色, 蓝色"
@@ -260,7 +281,7 @@ def remember(input_str: str) -> str:
     update_user_info(key, value)
     return f"已记住：{key} = {value}"
 
-# ==================== 第七部分：长期记忆管理 ====================
+# ==================== 第八部分：长期记忆管理 ====================
 MEMORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory.json")
 
 def load_memory():
@@ -298,7 +319,7 @@ def build_memory_prompt():
         lines.append(f"- {k}: {v}")
     return "\n".join(lines)
 
-# ==================== 第八部分：工具注册表 ====================
+# ==================== 第九部分：工具注册表 ====================
 TOOLS = {
     "search_web": search_web,
     "fetch_full_text": fetch_full_text,
@@ -309,7 +330,7 @@ TOOLS = {
     "remember": remember,
 }
 
-# ==================== 第九部分：Agent 核心循环 ====================
+# ==================== 第十部分：Agent 核心循环 ====================
 def process_query(client, model, messages, max_steps=8):
     for step in range(max_steps):
         resp = client.chat.completions.create(
@@ -366,7 +387,7 @@ def process_query(client, model, messages, max_steps=8):
 
     return "任务步数超限，请简化需求后重试。"
 
-# ==================== 第十部分：多 Agent 协作模块 ====================
+# ==================== 第十一部分：多 Agent 协作模块 ====================
 PLANNER_SYSTEM_PROMPT = """你是一个任务规划专家。你的职责是将用户的复杂需求拆分成一系列有序的子任务，每个子任务都是一个独立的、可以用自然语言描述的命令，交给执行 Agent 去完成。
 
 规则：
@@ -383,14 +404,7 @@ PLANNER_SYSTEM_PROMPT = """你是一个任务规划专家。你的职责是将�
 """
 
 def collaborative_process(client, model, user_task, max_subtasks=5):
-    """
-    协作模式入口：
-    1. 调用规划 Agent 拆分任务
-    2. 依次执行每个子任务（复用 process_query）
-    3. 汇总所有结果并返回
-    """
     print("\n🤝 进入协作模式 - 规划中...")
-    # 1. 规划
     plan_messages = [
         {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
         {"role": "user", "content": user_task}
@@ -398,12 +412,11 @@ def collaborative_process(client, model, user_task, max_subtasks=5):
     try:
         resp = client.chat.completions.create(model=model, messages=plan_messages, temperature=0.0)
         raw_plan = resp.choices[0].message.content.strip()
-        # 尝试提取 JSON 数组
         match = re.search(r'\[.*\]', raw_plan, re.DOTALL)
         if match:
             subtasks = json.loads(match.group())
         else:
-            subtasks = json.loads(raw_plan)  # 直接尝试
+            subtasks = json.loads(raw_plan)
     except Exception as e:
         return f"规划失败：{e}"
 
@@ -414,11 +427,9 @@ def collaborative_process(client, model, user_task, max_subtasks=5):
     for i, task in enumerate(subtasks):
         stream_print(f"  子任务{i+1}: {task}", delay=0.02)
 
-    # 2. 依次执行
     final_results = []
     for i, task in enumerate(subtasks):
         print(f"\n--- 执行子任务 {i+1}/{len(subtasks)} ---")
-        # 每个子任务使用全新的 messages，但保留 SYSTEM_PROMPT 使其具有工具能力
         exec_messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": task}
@@ -426,12 +437,10 @@ def collaborative_process(client, model, user_task, max_subtasks=5):
         result = process_query(client, model, exec_messages)
         final_results.append(f"子任务{i+1}结果：{result}")
 
-    # 3. 汇总（可选：再调一次模型生成最终总结，也可以直接拼接）
     summary = "\n".join(final_results)
-    # 为了简洁，直接返回拼接结果，不额外调用 API
     return f"协作任务完成！共完成 {len(subtasks)} 个子任务。\n\n{summary}"
 
-# ==================== 第十一部分：主交互函数 ====================
+# ==================== 第十二部分：主交互函数 ====================
 def main():
     client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
     model = MODEL_NAME
@@ -447,10 +456,11 @@ def main():
     print("  2. fetch_full_text   - 提取网页全文")
     print("  3. calculate         - 数学计算")
     print("  4. plot_height_distribution - 身高分布图")
-    print("  5. write_file        - 写入文件")
-    print("  6. read_file         - 读取文件")
+    print("  5. write_file        - 写入文件（→ products/）")
+    print("  6. read_file         - 读取文件（← products/）")
     print("  7. remember          - 长期记忆")
     print("【协作模式】输入以 '协作：' 开头，可自动拆分并执行多步骤任务")
+    print("【输出目录】所有生成的文件将保存在 products 文件夹中")
     print("【输入 'exit' 或 'quit' 退出】")
     print("=" * 60)
 
@@ -483,7 +493,6 @@ def main():
             print("协作模式：输入 '协作：你的复杂任务' 启动多 Agent 协作。")
             continue
 
-        # 判断协作模式
         if user_input.startswith("协作：") or user_input.startswith("协作:"):
             task_content = user_input.split("：", 1)[-1] if "：" in user_input else user_input.split(":", 1)[-1]
             final_answer = collaborative_process(client, model, task_content.strip())
@@ -493,7 +502,6 @@ def main():
             messages.append({"role": "user", "content": user_input})
             messages.append({"role": "assistant", "content": final_answer})
         else:
-            # 普通单 Agent 模式
             messages.append({"role": "user", "content": user_input})
             print("\n--- 开始处理 ---")
             final_answer = process_query(client, model, messages)
@@ -502,6 +510,6 @@ def main():
             stream_print(final_answer, delay=0.02, end="\n\n")
             messages.append({"role": "assistant", "content": final_answer})
 
-# ==================== 第十二部分：程序入口 ====================
+# ==================== 第十三部分：程序入口 ====================
 if __name__ == "__main__":
     main()
