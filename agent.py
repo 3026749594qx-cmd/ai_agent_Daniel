@@ -8,8 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from openai import OpenAI
 from web_search_china import WebSearchChina
-import trafilatura   # 全文提取
-
+import trafilatura
 # ==================== 第二部分：配置加载（支持自定义 API） ====================
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 if not os.path.exists(config_path):
