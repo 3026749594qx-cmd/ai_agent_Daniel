@@ -24,7 +24,7 @@
 在终端中执行：
 
 ```bash
-git clone https://github.com/3026749594qx-cmd/ai_agent_Daniel.git
+git clone https://github.com/Daniel-NULL/ai_agent_Daniel.git
 cd ai_agent_Daniel
 ```
 
